@@ -1,0 +1,787 @@
+/*
+ * Wumpus World
+ * Travis O'Donnell & John Coleman
+ * Frostburg State University
+ * COSC 450 Artificial Intelligence
+ * Email: teodonnell0@gmail.com
+ * Github: http://github.com/teodonnell/
+ *
+ * Copyright (c) 2013
+*/
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Random;
+import java.util.Stack;
+
+import lejos.nxt.Button;
+import lejos.nxt.ColorSensor;
+import lejos.nxt.LCD;
+import lejos.nxt.Motor;
+import lejos.nxt.SensorPort;
+import lejos.nxt.Sound;
+import lejos.robotics.Color;
+import lejos.robotics.RegulatedMotor;
+import lejos.robotics.navigation.DifferentialPilot;
+import lejos.robotics.navigation.MoveController;
+import lejos.util.Delay;
+
+/**
+ * Wumpus World
+ * See lab report for description of Wumpus World
+ * @author Travis ODonnell John Coleman
+ *
+ */
+public class WumpusWorld {
+	private static final RegulatedMotor RIGHT_MOTOR = Motor.C;
+	private static final RegulatedMotor LEFT_MOTOR = Motor.A;
+	private static final float TRACK_WIDTH = 15.24f; // Needs to be measured
+	private static Thread tracker;
+	/**
+	 * Byte values
+	 * 
+	 * Visited - 00000001 Safe - 00000010 Breeze - 00000100 Stench - 00001000
+	 * Glitter - 00010000 Pit - 00100000 Wumpus - 01000000
+	 */
+	private static final byte VISITED = 0x01, SAFE = 0x02, BREEZE = 0x04,
+			STENCH = 0x08, GLITTER = 0x10, PIT = 0x20, WUMPUS = 0x40;
+
+	private static CoordList stenchList, breezeList;
+
+	private static int location_x, location_y, wumpus_x, wumpus_y, pit_x,
+	pit_y, temp_x, temp_y;
+
+	private static int direction; // 0 - NORTH, 1 - EAST, 2 - SOUTH, 3 - WEST
+
+	private static int numArrows;
+
+	private static boolean isDead, hasGold, gameOver;
+	private static byte[][] world;
+
+	private static Random random;
+
+	private static final float FOOT_IN_CM = 42.1f;
+
+	private static DifferentialPilot pilot;
+	private static ColorTracker ct;
+	public static ColorSensor sensor;
+
+	/**
+	 * Coordinate class just holds a R^(2) (x,y) value from the Coordinate plane
+	 * @author ODonnell
+	 *
+	 */
+	static class Coordinate {
+		private int x, y;
+
+		public Coordinate(int x, int y) {
+			this.x = x;
+			this.y = y;
+		}
+
+		public int getX() {
+			return x;
+		}
+
+		public int getY() {
+			return y;
+		}
+
+		public Coordinate north() {
+			return new Coordinate(x, y + 1);
+		}
+
+		public Coordinate south() {
+			return new Coordinate(x, y - 1);
+		}
+
+		public Coordinate east() {
+			return new Coordinate(x + 1, y);
+		}
+
+		public Coordinate west() {
+			return new Coordinate(x - 1, y);
+		}
+	}
+
+	/**
+	 * Holds an arraylist of type Coordinate (could have just used an arraylist though)
+	 * @author ODonnell
+	 *
+	 */
+	static class CoordList {
+		private ArrayList<Coordinate> list;
+		private int size;
+
+		public CoordList() {
+			size = 0;
+			list = new ArrayList<Coordinate>();
+		}
+
+		public void addCoord(int x, int y) {
+			size++;
+			list.add(new Coordinate(x, y));
+		}
+
+		public int size() {
+			return size;
+		}
+
+		public Coordinate indexOf(int n) {
+			return list.get(n);
+		}
+
+	}
+
+	public static void main(String[] args) throws IOException,
+	InterruptedException {
+		initializeWorld();
+		initializeAgent();
+		setFlags();
+		while (!gameOver) {
+
+			LCD.drawString("" + ct.getCurrentWord(), 0, 1);
+			LCD.drawString("Direction " + direction, 0, 2);
+			LCD.drawString("X " + location_x + " Y " + location_y, 0, 3);
+			makeMove();
+			if (checkGold())
+				break;
+		}
+		LCD.clear();
+		if(checkGold())
+			LCD.drawString("Gold found!", 0, 0);
+		else
+			LCD.drawString("Game Over", 0, 0);
+	}
+
+	/**
+	 * Initializes all used variables
+	 */
+	private static void initializeWorld() {
+		world = new byte[4][4];
+		location_x = 0;
+		location_y = 3;
+		direction = 0;
+		numArrows = 1;
+		pit_x = -1;
+		pit_y = -1;
+		wumpus_x = -1;
+		wumpus_y = -1;
+		isDead = false;
+		hasGold = false;
+		gameOver = false;
+		random = new Random();
+		stenchList = new CoordList();
+		breezeList = new CoordList();
+
+		for (int i = 0; i < 4; i++)
+			for (int j = 0; j < 4; j++) {
+				world[i][j] = (byte) 0x00;
+				setFlag(SAFE, i, j);
+			}
+	}
+
+	/**
+	 * Initializes the agent.
+	 *  code below in this method is just setting up the DifferentialPilot class that came with LeJos
+	 * @throws IOException
+	 * @throws InterruptedException
+	 */
+	private static void initializeAgent() throws IOException,
+	InterruptedException {
+		pilot = new DifferentialPilot(MoveController.WHEEL_SIZE_NXT2,
+				TRACK_WIDTH, LEFT_MOTOR, RIGHT_MOTOR, false);
+		sensor = new ColorSensor(SensorPort.getInstance(0));
+
+		pilot.setTravelSpeed(25);
+		pilot.setRotateSpeed(60);
+		ct = new ColorTracker(sensor);
+		tracker = new Thread(ct);
+		tracker.start();
+		sensor.setFloodlight(Color.WHITE);
+	}
+
+	/**
+	 * returns boolean based upon wether bit value is set or not at X, Y
+	 * @param VALUE
+	 * @return
+	 */
+	private static boolean checkFlag(byte VALUE) {
+		return ((world[location_x][location_y] & VALUE) == VALUE);
+	}
+
+	/**
+	 * deletes the specified bit value from the world at X, Y 
+	 * @param VALUE
+	 * @param x
+	 * @param y
+	 */
+	private static void delFlag(byte VALUE, int x, int y) {
+		world[x][y] = (byte) (world[x][y] & ~VALUE);
+	}
+
+	/**
+	 * returns boolean based upon wether bit value is set or not at X, Y
+	 * @param VALUE
+	 * @return
+	 */
+	private static boolean checkFlag(byte VALUE, int x, int y) {
+		return ((world[x][y] & VALUE) == VALUE);
+	}
+
+	/**
+	 * Checks current color at position X, Y and sets corresponding bits
+	 * Black - Pit
+	 * BLUE - Breeze
+	 * Magenta - Wumpus
+	 * Yellow - Gold
+	 * Green - Pit and Stench
+	 * Orange - Gold and Stench
+	 * Red - stench
+	 */
+	private static void setFlags() {
+		Delay.msDelay(150);
+		switch (ct.getCurrentColor()) {
+		case Color.BLACK:
+			setFlag(PIT);
+			break;
+		case Color.BLUE:
+			setFlag(BREEZE);
+			break;
+		case Color.MAGENTA:
+			setFlag(WUMPUS);
+			break;
+		case Color.GREEN:
+			setFlag(STENCH);
+			setFlag(PIT);
+			break;
+		case Color.YELLOW:
+			setFlag(GLITTER);
+			setGold(true);
+			break;
+		case Color.ORANGE:
+			setFlag(GLITTER);
+			setFlag(BREEZE);
+			setGold(true);
+			break;
+		case Color.RED:
+			setFlag(STENCH);
+			break;
+		case Color.WHITE:
+			break;
+		default:
+			break;
+		}
+
+	}
+    /**
+     * Sets specified bit at current X, Y 
+     * @param f
+     */
+	private static void setFlag(Byte f) {
+		world[location_x][location_y] |= f;
+	}
+
+
+	/**
+	 * Sets specified bit at  current X, Y 
+	 * @param f
+	 */
+	private static void setFlag(Byte f, int x, int y) {
+		world[x][y] |= f;
+	}
+
+	/**
+	 * Returns boolean value based upon whether pit has been set or not 
+	 * @return
+	 */
+	private static boolean pitSet() {
+		if (pit_x != -1)
+			return true;
+		return false;
+	}
+
+	/**
+	 * Sets pit at X, Y position in the world
+	 * Deletes byte values for breeze, visited execpt for where pit is
+	 * Sets Safe value for all positions except for where pit is
+	 * @param x
+	 * @param y
+	 */
+	private static void setPit(int x, int y) {
+		pit_x = x;
+		pit_y = y;
+		world[pit_x][pit_y] |= PIT;
+		for (int i = 0; i < 4; i++) {
+			for (int j = 0; j < 4; j++)
+				if (i != pit_x && j != pit_y) {
+					delFlag(BREEZE, i, j);
+					setFlag(SAFE, i, j);
+					delFlag(VISITED, i, j);
+				}
+		}
+	}
+
+	/**
+	 * Set true is gold has been found
+	 * @param b
+	 */
+	private static void setGold(boolean b) {
+		gameOver = true;
+		hasGold = b;
+	}
+
+	/**
+	 * Return boolean value on whether wumpus is dead
+	 * @return
+	 */
+	private static boolean checkDead() {
+		return isDead;
+	}
+
+	/**
+	 * Returns boolean value on whether gold has been found or not
+	 * @return
+	 */
+	private static boolean checkGold() {
+		return hasGold;
+	}
+
+	/**
+	 * Shoots 'arrow' at wumpus. Only done when 2 known stench values are (See checkStench())
+	 * @return
+	 */
+	private static boolean shootArrow() {
+		LCD.drawString("SHOOOOOOOT", 0, 0);
+		if (numArrows > 0) {
+			numArrows--;
+			Sound.playTone(2000, 1250);
+		}
+		return false;
+	}
+
+	/**
+	 * Checks to see if X and Y are within the array bounds
+	 * @param x
+	 * @param y
+	 * @return
+	 */
+	private static boolean checkValid(int x, int y) {
+		if (x >= 0 && x < 4 && y >= 0 && y < 4)
+			return true;
+		return false;
+	}
+
+	/**
+	 * Rotates the agent based upon current direction to the new specified direction
+	 * @param d
+	 */
+	private static void changeDirection(int d) {
+		LCD.drawString("Direction", 0, 0);
+		switch (direction) {
+		case 0:
+			if (d == 1)
+				pilot.rotate(142);
+			if (d == 2)
+				pilot.rotate(142 * 2);
+			if (d == 3)
+				pilot.rotate(-142);
+			break;
+		case 1:
+			if (d == 0)
+				pilot.rotate(-142);
+			if (d == 2)
+				pilot.rotate(142);
+			if (d == 3)
+				pilot.rotate(142 * 2);
+			break;
+		case 2:
+			if (d == 0)
+				pilot.rotate(142 * 2);
+			if (d == 1)
+				pilot.rotate(-142);
+			if (d == 3)
+				pilot.rotate(142);
+			break;
+		case 3:
+			if (d == 0)
+				pilot.rotate(142);
+			if (d == 1)
+				pilot.rotate(142 * 2);
+			if (d == 2)
+				pilot.rotate(-142);
+			break;
+		default:
+			break;
+		}
+		direction = d;
+	}
+
+	/**
+	 * Traverses to next position if position is safe to venture to, else try a new random direction
+	 * @return
+	 */
+	private static boolean traverse() {
+		LCD.drawString("Traverse", 0, 0);
+		switch (direction) {
+		case 0:
+			if (location_y + 1 < 4) {
+				if (checkFlag(SAFE, location_x, location_y + 1)
+						&& location_x != wumpus_x && location_y + 1 != wumpus_y) {
+					pilot.travel(FOOT_IN_CM);
+					location_y++;
+				} else {
+					changeDirection((int) (Math.random() * 4));
+					traverse();
+				}
+				return true;
+			}
+			return false;
+		case 2:
+			if (location_y - 1 >= 0) {
+				if (checkFlag(SAFE, location_x, location_y - 1)
+						&& location_x != wumpus_x && location_y - 1 != wumpus_y) {
+					pilot.travel(FOOT_IN_CM);
+					location_y--;
+				} else {
+					LCD.drawString("TURN", 0, 0);
+					changeDirection((int) (Math.random() * 4));
+					traverse();
+				}
+			}
+			return false;
+		case 1:
+			if (location_x + 1 < 4) {
+				if (checkFlag(SAFE, location_x + 1, location_y)
+						&& location_x + 1 != wumpus_x && location_y != wumpus_y) {
+					pilot.travel(FOOT_IN_CM);
+					location_x++;
+				} else {
+					LCD.drawString("TURN", 0, 0);
+					changeDirection(((int) Math.random() * 4));
+					traverse();
+				}
+				return true;
+			}
+			return false;
+		case 3:
+			if (location_x - 1 >= 0) {
+				if (checkFlag(SAFE, location_x - 1, location_y)
+						&& location_x - 1 != wumpus_x && location_y != wumpus_y) {
+					pilot.travel(FOOT_IN_CM);
+					location_x--;
+				} else {
+					LCD.drawString("TURN", 0, 0);
+					changeDirection(((int) Math.random() * 4));
+					traverse();
+				}
+				return true;
+			}
+			return false;
+		default:
+			return false;
+		}
+
+	}
+
+	/**
+	 * Checks to make sure the agent didn't make a mistake and end up in
+	 * dangerous room (wumpus, pit)
+	 * 
+	 * @return true if game over
+	 */
+	private static boolean checkForMistake() {
+		if (checkFlag(WUMPUS) || checkFlag(PIT)) {
+			gameOver = true;
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Changes current direction to opposite using Mod operator
+	 */
+	private static void getOppositeDirection() {
+		changeDirection((direction + 2) % 4);
+	}
+
+	/**
+	 * Depending on which current direction of agent, sets unsafe byte values for 
+	 * position ahead, right, left of agent
+	 */
+	private static void setUnsafeFlags() {
+		switch (direction) {
+		case 0:
+			if (checkValid(location_x, location_y + 1))
+				delFlag(SAFE, location_x, location_y + 1);
+			if (checkValid(location_x + 1, location_y))
+				delFlag(SAFE, location_x + 1, location_y);
+			if (checkValid(location_x - 1, location_y))
+				delFlag(SAFE, location_x - 1, location_y);
+			break;
+		case 1:
+			if (checkValid(location_x, location_y + 1))
+				delFlag(SAFE, location_x, location_y + 1);
+			if (checkValid(location_x + 1, location_y))
+				delFlag(SAFE, location_x + 1, location_y);
+			if (checkValid(location_x, location_y - 1))
+				delFlag(SAFE, location_x, location_y - 1);
+			break;
+		case 2:
+			if (checkValid(location_x, location_y - 1))
+				delFlag(SAFE, location_x, location_y - 1);
+			if (checkValid(location_x + 1, location_y))
+				delFlag(SAFE, location_x + 1, location_y);
+			if (checkValid(location_x - 1, location_y))
+				delFlag(SAFE, location_x - 1, location_y);
+			break;
+		case 3:
+			if (checkValid(location_x, location_y + 1))
+				delFlag(SAFE, location_x, location_y + 1);
+			if (checkValid(location_x, location_y - 1))
+				delFlag(SAFE, location_x, location_y - 1);
+			if (checkValid(location_x - 1, location_y))
+				delFlag(SAFE, location_x - 1, location_y);
+			break;
+
+		}
+	}
+
+	/**
+	 * Checks stench byte value at current location 
+	 * If we already have stench recorded at current position, do nothing
+	 * Else Add position to StenchList, if it is first element in StenchList, rotate backwards and keep traversing
+	 * If it is the second stench value recorded, pinpoints exact location of wumpus, rotates agent towards wumpus and shoots arrow
+	 * @return
+	 */
+	private static boolean checkStench() {
+		if (checkFlag(STENCH)) {
+			boolean checked = false;
+			for (int i = 0; i < stenchList.size(); i++) {
+				if ((location_x == stenchList.indexOf(i).getX())
+						&& (location_y == stenchList.indexOf(i).getY()))
+					checked = true;
+			}
+			if (checkFlag(STENCH) && !checked) {
+				stenchList.addCoord(location_x, location_y);
+				switch (stenchList.size()) {
+				case 1:
+					setUnsafeFlags();
+					getOppositeDirection();
+					for (int i = 0; i < 4; i++)
+						for (int j = 0; j < 4; j++)
+							delFlag(VISITED, i, j);
+					break;
+				case 2:
+					Coordinate t = stenchList.indexOf(0);
+					int d = calculateDirection(t);
+					changeDirection(d);
+					shootArrow();
+					for (int i = 0; i < 4; i++) {
+						for (int j = 0; j < 4; j++)
+							if (i != pit_x && j != pit_y) {
+								setFlag(SAFE, i, j);
+								delFlag(VISITED, i, j);
+								delFlag(WUMPUS, i, j);
+								delFlag(STENCH, i, j);
+							}
+					}
+					break;
+				default: // We already found wumpus, so we don't need to do
+					// anything
+					// for 3 and 4
+					break;
+				}
+				return true;
+			}
+			return false;
+		}
+		return false;
+	}
+
+	/**
+	 * Uses for shooting arrow
+	 * Based upon current direction, location and wumpus location returns direction it needs to look to correctly fire arrow
+	 * @param t
+	 * @return
+	 */
+	private static int calculateDirection(Coordinate t) {
+		if (t.getX() == location_x)
+			if (t.getY() > location_y)
+				return 3;
+			else
+				return 1;
+		else if (t.getY() == location_y)
+			if (t.getX() > location_x)
+				return 2;
+			else
+				return 0;
+		else if ((t.getX() + 1 == location_x))
+			return 3;
+		else if (t.getX() - 1 == location_x)
+			return 1;
+		else if (t.getY() + 1 == location_y)
+			return 0;
+		else if (t.getY() - 1 == location_y)
+			return 2;
+		return -1;
+	}
+
+	/**
+	 * Checks if agent has glitter
+	 * @return
+	 */
+	private static boolean checkGlitter() {
+		if (checkFlag(GLITTER)) {
+			setGold(true); // Picked up gold
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Checks breeze byte value at current location 
+	 * If we already have breeze recorded at current position, do nothing
+	 * Else Add position to breezeList, if it is first element in breezeList, rotate backwards and keep traversing
+	 * If it is the second stench value recorded, pinpoints exact location of pit, sets unsafe and sets pit
+	 * @return
+	 */
+	private static boolean checkBreeze() {
+		if (checkFlag(BREEZE)) {
+			boolean checked = false;
+			for (int i = 0; i < breezeList.size(); i++) {
+				if ((location_x == breezeList.indexOf(i).getX())
+						&& (location_y == breezeList.indexOf(i).getY()))
+					checked = true;
+			}
+			if (checkFlag(BREEZE) && !checked) {
+				breezeList.addCoord(location_x, location_y);
+				switch (breezeList.size()) {
+				case 1:
+					setUnsafeFlags();
+					getOppositeDirection();
+
+					break;
+				case 2:
+					Coordinate t = breezeList.indexOf(0);
+					pit_x = (int) ((location_x + t.getX()) / 2 + 1);
+					pit_y = (int) ((location_y + t.getY()) / 2 + 1);
+					setPit(pit_x, pit_y);
+					break;
+				default: // We already found pit, so we don't need to do
+					// anything
+					// for 3 and 4
+					break;
+				}
+				return true;
+			}
+			return false;
+		}
+		return false;
+
+	}
+
+	/**
+	 * Adds neighbor coordinate to a coordlist for traverseHelper function
+	 * @return
+	 */
+	private static CoordList neighborHelper() {
+		CoordList neighbors = new CoordList();
+
+		neighbors.addCoord(location_x, location_y + 1);
+		neighbors.addCoord(location_x + 1, location_y);
+		neighbors.addCoord(location_x, location_y - 1);
+		neighbors.addCoord(location_x - 1, location_y);
+
+		return neighbors;
+	}
+
+	/**
+	 * Goes through neighbor coordinates, traverses based upon already visited or safe 
+	 */
+	private static void traverseHelper() {
+		LCD.drawString("TraverseHelper", 0, 5);
+		CoordList neighbors = neighborHelper();
+		int x, y;
+		for (int i = 0; i < 4; i++) {
+			x = neighbors.indexOf(i).getX();
+			y = neighbors.indexOf(i).getY();
+			if (x < 4 && y < 4 && x >= 0 && y >= 0) {
+				if (checkFlag(SAFE, x, y) && !checkFlag(VISITED, x, y)) {
+					changeDirection(i);
+					traverse();
+					return;
+				}
+			}
+		}
+		for (int i = 0; i < 4; i++)
+			for (int j = 0; j < 4; j++)
+				delFlag(VISITED, i, j);
+
+	}
+
+	/**
+	 * Checks if agent made a mistake
+	 * If not, setsFlags for current position
+	 * Checks whether stench, gold or breeze is at current position
+	 * Goes to traverseHelper
+	 * @return
+	 * @throws InterruptedException
+	 */
+	public static boolean makeMove() throws InterruptedException {
+		Delay.msDelay(1000);
+		if (!checkForMistake() || gameOver) {
+			setFlags();
+			setFlag(VISITED);
+			if (!checkDead())
+				checkStench();
+			if (!pitSet())
+				checkBreeze();
+			if (checkFlag(PIT)) {
+				gameOver = true;
+				return true;
+			}
+			if (checkGlitter()) {
+				setGold(true);
+				Sound.beepSequenceUp();
+				return true;
+			}
+			traverseHelper();
+		}
+		return false;
+	}
+
+	/*
+	 * Ideas for this class came from ColorSensorTest.java, which is found
+	 * within the leJos sample code
+	 */
+	static class ColorTracker implements Runnable {
+		public int currentColor; // Need to let Main.java see this value
+		String colorNames[] = { "None", "Red", "Green", "Blue", "Yellow",
+				"Megenta", "Orange", "White", "Black", "Pink", "Grey",
+				"Light Grey", "Dark Grey", "Cyan" };
+		private ColorSensor sensor;
+		private String currentColorName;
+
+		public ColorTracker(ColorSensor s) {
+			this.sensor = s;
+		}
+
+		public void run() {
+			while (true || Button.ESCAPE.isDown()) {
+				ColorSensor.Color value = sensor.getColor();
+				currentColor = value.getColor();
+
+			}
+		}
+
+		public String getCurrentWord() {
+			return colorNames[currentColor + 1];
+		}
+
+		public int getCurrentColor() {
+			return currentColor;
+		}
+	}
+}
+**/
